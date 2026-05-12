@@ -13,8 +13,9 @@ Instead of squinting at `git diff` in the terminal, ask Claude Code to show you 
 1. Picks the right diff scope (working tree vs HEAD by default, but honors "compare to main", "last commit", "staged only", etc.).
 2. Pipes that into `bunx --bun diff2html-cli` to produce a self-contained side-by-side HTML page.
 3. Includes **untracked files** too, by feeding `git diff --no-index /dev/null <file>` for each one — without mutating your index.
-4. Strips the `diff2html` promo header via the native `-t` flag (the title becomes `git diff: <repo-name>`).
-5. Opens the result in a **per-project** Maestri portal called `Diff: <repo-basename>`. The HTML file and portal name are both keyed off the repo's basename + a short hash of its absolute path, so working on multiple projects at once doesn't clobber any of the open diffs — each project gets its own portal on the canvas.
+4. **Filters out lockfiles by default** on both tracked and untracked sides (`bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Podfile.lock`, `Cargo.lock`, `go.sum`, etc.) so the HTML doesn't blow up to tens of MB for a regular review. Tracked files are filtered via git pathspecs (`:(exclude,glob)**/<lockfile>`); untracked files by name. Ask explicitly to "include lockfiles" if you actually want to see them.
+5. Strips the `diff2html` promo header via the native `-t` flag (the title becomes `git diff: <repo-name>`).
+6. Opens the result in a **per-project** Maestri portal called `Diff: <repo-basename>`. The HTML file and portal name are both keyed off the repo's basename + a short hash of its absolute path, so working on multiple projects at once doesn't clobber any of the open diffs — each project gets its own portal on the canvas.
 
 ## Installation
 
@@ -54,9 +55,17 @@ REPO_HASH=$(printf '%s' "$REPO_ROOT" | shasum | cut -c1-6)
 DIFF_FILE="/tmp/claude-diff-${REPO_NAME}-${REPO_HASH}.html"
 PORTAL_NAME="Diff: ${REPO_NAME}"
 
+LOCKFILE_RE='(^|/)(bun\.lock|bun\.lockb|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|Gemfile\.lock|composer\.lock|Pipfile\.lock|poetry\.lock|uv\.lock|go\.sum|mix\.lock|Podfile\.lock)$'
+EXCLUDE_LOCKFILES=()
+for f in bun.lock bun.lockb package-lock.json npm-shrinkwrap.json yarn.lock \
+         pnpm-lock.yaml Cargo.lock Gemfile.lock composer.lock Pipfile.lock \
+         poetry.lock uv.lock go.sum mix.lock Podfile.lock; do
+  EXCLUDE_LOCKFILES+=(":(exclude,glob)**/$f")
+done
+
 {
-  git diff HEAD
-  git ls-files --others --exclude-standard | while IFS= read -r f; do
+  git diff HEAD -- . "${EXCLUDE_LOCKFILES[@]}"
+  git ls-files --others --exclude-standard | grep -Ev "$LOCKFILE_RE" | while IFS= read -r f; do
     git diff --no-index --binary -- /dev/null "$f" || true
   done
 } | bunx --bun diff2html-cli -i stdin -s side -t "git diff: $REPO_NAME" -F "$DIFF_FILE"

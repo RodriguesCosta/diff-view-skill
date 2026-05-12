@@ -53,16 +53,32 @@ Reruns on the same repo overwrite the same file and reuse the same portal — ex
 
 ### 3. Generate the HTML
 
-Compose a single diff stream that includes both tracked changes (`git diff HEAD`) **and** every untracked file (rendered as a new-file diff via `git diff --no-index /dev/null <file>`), then pipe it through `diff2html-cli` via `bunx --bun`. The `--bun` flag forces the Bun runtime (rather than letting bunx fall back to Node):
+Compose a single diff stream that includes both tracked changes (`git diff HEAD`) **and** every untracked file (rendered as a new-file diff via `git diff --no-index /dev/null <file>`), with **lockfiles filtered out by default** on both sides (they generate huge, low-signal diffs — `package-lock.json` alone can be 17,000+ lines). Then pipe through `diff2html-cli` via `bunx --bun`. The `--bun` flag forces the Bun runtime (rather than letting bunx fall back to Node):
 
 ```bash
+# Lockfiles excluded by default. Add or remove names as needed; if the user
+# explicitly asks for lockfile changes, drop these filters for that run.
+LOCKFILE_RE='(^|/)(bun\.lock|bun\.lockb|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|Gemfile\.lock|composer\.lock|Pipfile\.lock|poetry\.lock|uv\.lock|go\.sum|mix\.lock|Podfile\.lock)$'
+
+EXCLUDE_LOCKFILES=()
+for f in bun.lock bun.lockb package-lock.json npm-shrinkwrap.json yarn.lock \
+         pnpm-lock.yaml Cargo.lock Gemfile.lock composer.lock Pipfile.lock \
+         poetry.lock uv.lock go.sum mix.lock Podfile.lock; do
+  EXCLUDE_LOCKFILES+=(":(exclude,glob)**/$f")
+done
+
 {
-  git diff HEAD
-  git ls-files --others --exclude-standard | while IFS= read -r f; do
+  git diff HEAD -- . "${EXCLUDE_LOCKFILES[@]}"
+  git ls-files --others --exclude-standard | grep -Ev "$LOCKFILE_RE" | while IFS= read -r f; do
     git diff --no-index --binary -- /dev/null "$f" || true
   done
 } | bunx --bun diff2html-cli -i stdin -s side -t "git diff: $REPO_NAME" -F "$DIFF_FILE"
 ```
+
+How the filtering works:
+- **Tracked changes** are filtered via git pathspecs (`':(exclude,glob)**/<lockfile>'`) — git skips them at the diff level, so the stream is small.
+- **Untracked files** are filtered by `grep -Ev` against `LOCKFILE_RE` before the `--no-index` loop runs.
+- The two lists are kept in sync (same basenames). If you add a new lockfile to skip, add it in both places.
 
 Why the loop for untracked files: `git diff HEAD` ignores files git doesn't yet know about. Using `git diff --no-index /dev/null <file>` produces a standard "new file" unified diff for each untracked file **without mutating the index** (no `git add -N`, no cleanup needed). The `|| true` is required because `git diff --no-index` exits 1 whenever files differ — which is always for a new file vs `/dev/null`.
 
@@ -101,5 +117,5 @@ git diff HEAD --stat        # per-file breakdown
 - The portal name is `Diff: <repo-basename>` so you can spot at a glance which project a portal belongs to on the canvas.
 - The first invocation of `bunx --bun diff2html-cli` may take a few seconds while Bun fetches the package; subsequent runs are fast (cached).
 - If `bun` is not installed, surface the error and ask the user before falling back to `npx` — we chose Bun on purpose.
-- Untracked lockfiles (`bun.lock`, `package-lock.json`, etc.) can blow up the HTML size significantly because they're rendered as full new-file diffs. If the user complains about size or slowness, they can either commit/ignore the lockfile or ask the skill to skip lockfiles for that run.
+- Lockfiles (`bun.lock`, `package-lock.json`, `yarn.lock`, `Podfile.lock`, etc.) are filtered out by default on both tracked and untracked sides. If the user explicitly asks to **include** lockfile changes (e.g., "diff including lockfiles", "I want to see the package-lock changes"), drop the `EXCLUDE_LOCKFILES` from the `git diff` invocation and the `grep -Ev "$LOCKFILE_RE"` from the untracked pipeline for that run.
 - If `diff2html-cli` writes anything to stderr, surface it rather than swallowing it silently.
