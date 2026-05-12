@@ -13,8 +13,8 @@ Instead of squinting at `git diff` in the terminal, ask Claude Code to show you 
 1. Picks the right diff scope (working tree vs HEAD by default, but honors "compare to main", "last commit", "staged only", etc.).
 2. Pipes that into `bunx --bun diff2html-cli` to produce a self-contained side-by-side HTML page.
 3. Includes **untracked files** too, by feeding `git diff --no-index /dev/null <file>` for each one — without mutating your index.
-4. Strips the `diff2html` promo header via the native `-t "git diff"` flag.
-5. Opens the result in a Maestri portal called **Diff** (reuses the portal on subsequent runs, with a cache-busting query string so the new content loads).
+4. Strips the `diff2html` promo header via the native `-t` flag (the title becomes `git diff: <repo-name>`).
+5. Opens the result in a **per-project** Maestri portal called `Diff: <repo-basename>`. The HTML file and portal name are both keyed off the repo's basename + a short hash of its absolute path, so working on multiple projects at once doesn't clobber any of the open diffs — each project gets its own portal on the canvas.
 
 ## Installation
 
@@ -48,23 +48,31 @@ By default it shows all uncommitted changes (staged + unstaged + untracked) vs `
 The core pipeline is roughly:
 
 ```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_NAME=$(basename "$REPO_ROOT")
+REPO_HASH=$(printf '%s' "$REPO_ROOT" | shasum | cut -c1-6)
+DIFF_FILE="/tmp/claude-diff-${REPO_NAME}-${REPO_HASH}.html"
+PORTAL_NAME="Diff: ${REPO_NAME}"
+
 {
   git diff HEAD
   git ls-files --others --exclude-standard | while IFS= read -r f; do
     git diff --no-index --binary -- /dev/null "$f" || true
   done
-} | bunx --bun diff2html-cli -i stdin -s side -t "git diff" -F /tmp/claude-diff.html
+} | bunx --bun diff2html-cli -i stdin -s side -t "git diff: $REPO_NAME" -F "$DIFF_FILE"
 
-maestri portal create "file:///tmp/claude-diff.html" "Diff"
-# or, if Diff portal already exists:
-maestri portal navigate "Diff" "file:///tmp/claude-diff.html?$(date +%s)"
+if maestri list 2>&1 | grep -Fq "name: \"$PORTAL_NAME\""; then
+  maestri portal navigate "$PORTAL_NAME" "file://${DIFF_FILE}?$(date +%s)"
+else
+  maestri portal create "file://${DIFF_FILE}" "$PORTAL_NAME"
+fi
 ```
 
-The cache-bust query string forces the portal to reload since the file path stays the same across runs.
+The cache-bust query string forces the portal to reload since the file path stays the same across runs of the same repo. The hash on the file name prevents two repos that happen to share a basename from overwriting each other's HTML.
 
 ## Maestri integration
 
-The HTML is fully self-contained (CSS + JS inlined) and served via `file://`, so no local web server is needed. The skill keeps a single portal named **Diff** around and points it at the latest HTML on each run, so the diff view sits in a predictable spot on your canvas.
+The HTML is fully self-contained (CSS + JS inlined) and served via `file://`, so no local web server is needed. Each project gets its own portal — `Diff: <repo-basename>` — so you can keep diffs open side by side while jumping between projects.
 
 ## License
 

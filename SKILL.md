@@ -37,7 +37,21 @@ git diff HEAD --quiet && echo "no changes" || echo "has changes"
 
 If empty, tell the user there's nothing to diff and stop — don't open an empty page.
 
-### 2. Generate the HTML
+### 2. Compute per-project identifiers
+
+Before generating anything, derive a stable-per-project filename and portal name so multiple projects open in parallel **without clobbering each other's diffs**. The repo's directory basename gives a readable label; a short hash of the full absolute path disambiguates two repos that happen to share a basename:
+
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_NAME=$(basename "$REPO_ROOT")
+REPO_HASH=$(printf '%s' "$REPO_ROOT" | shasum | cut -c1-6)
+DIFF_FILE="/tmp/claude-diff-${REPO_NAME}-${REPO_HASH}.html"
+PORTAL_NAME="Diff: ${REPO_NAME}"
+```
+
+Reruns on the same repo overwrite the same file and reuse the same portal — exactly what you want. Two different repos get distinct files and portals.
+
+### 3. Generate the HTML
 
 Compose a single diff stream that includes both tracked changes (`git diff HEAD`) **and** every untracked file (rendered as a new-file diff via `git diff --no-index /dev/null <file>`), then pipe it through `diff2html-cli` via `bunx --bun`. The `--bun` flag forces the Bun runtime (rather than letting bunx fall back to Node):
 
@@ -47,7 +61,7 @@ Compose a single diff stream that includes both tracked changes (`git diff HEAD`
   git ls-files --others --exclude-standard | while IFS= read -r f; do
     git diff --no-index --binary -- /dev/null "$f" || true
   done
-} | bunx --bun diff2html-cli -i stdin -s side -t "git diff" -F /tmp/claude-diff.html
+} | bunx --bun diff2html-cli -i stdin -s side -t "git diff: $REPO_NAME" -F "$DIFF_FILE"
 ```
 
 Why the loop for untracked files: `git diff HEAD` ignores files git doesn't yet know about. Using `git diff --no-index /dev/null <file>` produces a standard "new file" unified diff for each untracked file **without mutating the index** (no `git add -N`, no cleanup needed). The `|| true` is required because `git diff --no-index` exits 1 whenever files differ — which is always for a new file vs `/dev/null`.
@@ -55,34 +69,26 @@ Why the loop for untracked files: `git diff HEAD` ignores files git doesn't yet 
 Flags worth knowing:
 - `-i stdin` — read the diff from stdin (the piped git output)
 - `-s side` — side-by-side layout (`line` for unified/inline if the user prefers it)
-- `-t "git diff"` — page title. diff2html-cli's `--title` overrides **both** the `<title>` element and the visible `<h1>` page header, replacing the default `"Diff to HTML by rtfpessoa"` promo header. Pick any title that fits — `"git diff"` is a clean default.
-- `-F /tmp/claude-diff.html` — write a standalone HTML file to this path. With `-F` set, diff2html-cli won't open its own preview browser, which is what we want.
+- `-t "git diff: $REPO_NAME"` — page title. diff2html-cli's `--title` overrides **both** the `<title>` element and the visible `<h1>` page header, replacing the default `"Diff to HTML by rtfpessoa"` promo header. Including the repo name makes the portal tab self-identifying when multiple are open.
+- `-F "$DIFF_FILE"` — write a standalone HTML file to this path. With `-F` set, diff2html-cli won't open its own preview browser, which is what we want.
 
 The HTML is fully self-contained (CSS + JS inlined), so `file://` works without running a local server.
 
-### 3. Open in a Maestri portal
+### 4. Open in a Maestri portal
 
-Check existing portals first to avoid cluttering the canvas with duplicates:
-
-```bash
-maestri list
-```
-
-If a portal named **Diff** already exists, reuse it. Append a cache-busting query string so the portal definitely reloads the new file content (the file path stays the same across runs and browsers may serve the cached version otherwise):
+Create the portal if it doesn't exist yet for this project, otherwise navigate the existing one to the new file. Append a cache-busting query string on reuse so the portal definitely reloads (the file path is stable, so the portal would otherwise serve a cached version):
 
 ```bash
-maestri portal navigate "Diff" "file:///tmp/claude-diff.html?$(date +%s)"
+if maestri list 2>&1 | grep -Fq "name: \"$PORTAL_NAME\""; then
+  maestri portal navigate "$PORTAL_NAME" "file://${DIFF_FILE}?$(date +%s)"
+else
+  maestri portal create "file://${DIFF_FILE}" "$PORTAL_NAME"
+fi
 ```
 
-Otherwise create a new one (it'll be placed next to the terminal automatically):
+### 5. Summarize what's open
 
-```bash
-maestri portal create "file:///tmp/claude-diff.html" "Diff"
-```
-
-### 4. Summarize what's open
-
-Tell the user briefly what they're looking at — e.g., "Opened diff in the 'Diff' portal: 4 files changed (+87/-23)". Useful one-liners that match the scope you used:
+Tell the user briefly what they're looking at — e.g., "Opened diff in the 'Diff: baas-mobile' portal: 4 files changed (+87/-23)". Useful one-liners that match the scope you used:
 
 ```bash
 git diff HEAD --shortstat   # files changed, insertions, deletions
@@ -91,8 +97,9 @@ git diff HEAD --stat        # per-file breakdown
 
 ## Notes
 
-- `/tmp/claude-diff.html` is overwritten on each run — that's intentional; it's a temporary artifact.
+- The HTML file at `/tmp/claude-diff-${REPO_NAME}-${REPO_HASH}.html` is overwritten on each run for that repo — that's intentional; it's a per-project temporary artifact. Different repos get different files, so multiple projects can have their diffs open at the same time.
+- The portal name is `Diff: <repo-basename>` so you can spot at a glance which project a portal belongs to on the canvas.
 - The first invocation of `bunx --bun diff2html-cli` may take a few seconds while Bun fetches the package; subsequent runs are fast (cached).
 - If `bun` is not installed, surface the error and ask the user before falling back to `npx` — we chose Bun on purpose.
+- Untracked lockfiles (`bun.lock`, `package-lock.json`, etc.) can blow up the HTML size significantly because they're rendered as full new-file diffs. If the user complains about size or slowness, they can either commit/ignore the lockfile or ask the skill to skip lockfiles for that run.
 - If `diff2html-cli` writes anything to stderr, surface it rather than swallowing it silently.
-- The portal name "Diff" is a convention so subsequent runs reuse the same portal node. If the user wants a fresh one (e.g., to compare two diffs side by side), they can ask for it.
